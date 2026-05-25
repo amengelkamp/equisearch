@@ -89,25 +89,17 @@ function ingestCompetition(db: Database.Database, competition: AnyCompetition, s
 
 // ── Show crawling ────────────────────────────────────────────────────────────
 
-export async function crawlShow(db: Database.Database, showId: number) {
+export async function crawlShow(db: Database.Database, showId: number): Promise<number> {
   if (isShowCrawled(db, showId)) {
     log(`show ${showId} already crawled, skipping`);
-    return;
+    return 0;
   }
 
   const masterlist = await getShowMasterlist(showId);
   if (!masterlist) {
     log(`show ${showId} not found`);
-    return;
+    return 0;
   }
-
-  upsertShow(db, {
-    id: masterlist.showId,
-    name: masterlist.name,
-    nationIoc: masterlist.nationIoc ?? null,
-    firstDay: masterlist.firstDay ?? null,
-    lastDay: masterlist.lastDay ?? null,
-  });
 
   const eligible = masterlist.competitions.filter(
     (c) =>
@@ -117,6 +109,17 @@ export async function crawlShow(db: Database.Database, showId: number) {
   );
 
   log(`show ${showId} "${masterlist.name}" — ${eligible.length}/${masterlist.competitions.length} eligible competitions`);
+
+  if (eligible.length === 0) return 0;
+
+  // Only store the show once we know it has publishable results
+  upsertShow(db, {
+    id: masterlist.showId,
+    name: masterlist.name,
+    nationIoc: masterlist.nationIoc ?? null,
+    firstDay: masterlist.firstDay ?? null,
+    lastDay: masterlist.lastDay ?? null,
+  });
 
   let totalResults = 0;
   for (const comp of eligible) {
@@ -138,6 +141,7 @@ export async function crawlShow(db: Database.Database, showId: number) {
   }
 
   log(`show ${showId} done — ${totalResults} results total`);
+  return totalResults;
 }
 
 // ── Date-range crawling ──────────────────────────────────────────────────────
@@ -167,8 +171,8 @@ export async function crawlDateRange(
       if (crawledShows >= maxShows) break;
 
       await delay(DELAY_MS);
-      await crawlShow(db, parseInt(show.id, 10));
-      crawledShows++;
+      const ingested = await crawlShow(db, parseInt(show.id, 10));
+      if (ingested > 0) crawledShows++;
     }
 
     if (page + 1 >= result.totalPages) break;

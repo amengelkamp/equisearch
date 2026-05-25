@@ -1,6 +1,15 @@
 import Database from "better-sqlite3";
 import path from "path";
 
+export function normalizeForSearch(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss");
+}
+
 const DB_PATH = path.join(process.cwd(), "data", "equi-score.db");
 
 let _db: Database.Database | null = null;
@@ -38,18 +47,20 @@ function initSchema(db: Database.Database) {
     );
 
     CREATE TABLE IF NOT EXISTS persons (
-      api_id      TEXT PRIMARY KEY,
-      name        TEXT NOT NULL,
-      first_name  TEXT,
-      family_name TEXT,
-      nation_ioc  TEXT
+      api_id          TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      name_normalized TEXT,
+      first_name      TEXT,
+      family_name     TEXT,
+      nation_ioc      TEXT
     );
 
     CREATE TABLE IF NOT EXISTS horses (
-      api_id         TEXT PRIMARY KEY,
-      name           TEXT NOT NULL,
-      bridle_number  TEXT,
-      nation_ioc     TEXT
+      api_id          TEXT PRIMARY KEY,
+      name            TEXT NOT NULL,
+      name_normalized TEXT,
+      bridle_number   TEXT,
+      nation_ioc      TEXT
     );
 
     CREATE TABLE IF NOT EXISTS results (
@@ -70,7 +81,9 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_results_horse     ON results(horse_api_id);
     CREATE INDEX IF NOT EXISTS idx_results_comp      ON results(competition_id);
     CREATE INDEX IF NOT EXISTS idx_persons_name      ON persons(name COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_persons_name_norm ON persons(name_normalized);
     CREATE INDEX IF NOT EXISTS idx_horses_name       ON horses(name COLLATE NOCASE);
+    CREATE INDEX IF NOT EXISTS idx_horses_name_norm  ON horses(name_normalized);
     CREATE INDEX IF NOT EXISTS idx_competitions_show ON competitions(show_id);
     CREATE INDEX IF NOT EXISTS idx_shows_first_day   ON shows(first_day);
   `);
@@ -126,14 +139,15 @@ export function upsertPerson(db: Database.Database, person: {
   nationIoc: string | null;
 }) {
   db.prepare(`
-    INSERT INTO persons (api_id, name, first_name, family_name, nation_ioc)
-    VALUES (@apiId, @name, @firstName, @familyName, @nationIoc)
+    INSERT INTO persons (api_id, name, name_normalized, first_name, family_name, nation_ioc)
+    VALUES (@apiId, @name, @nameNormalized, @firstName, @familyName, @nationIoc)
     ON CONFLICT(api_id) DO UPDATE SET
-      name        = excluded.name,
-      first_name  = excluded.first_name,
-      family_name = excluded.family_name,
-      nation_ioc  = excluded.nation_ioc
-  `).run(person);
+      name            = excluded.name,
+      name_normalized = excluded.name_normalized,
+      first_name      = excluded.first_name,
+      family_name     = excluded.family_name,
+      nation_ioc      = excluded.nation_ioc
+  `).run({ ...person, nameNormalized: normalizeForSearch(person.name) });
 }
 
 export function upsertHorse(db: Database.Database, horse: {
@@ -143,12 +157,13 @@ export function upsertHorse(db: Database.Database, horse: {
   nationIoc: string | null;
 }) {
   db.prepare(`
-    INSERT INTO horses (api_id, name, bridle_number, nation_ioc)
-    VALUES (@apiId, @name, @bridleNumber, @nationIoc)
+    INSERT INTO horses (api_id, name, name_normalized, bridle_number, nation_ioc)
+    VALUES (@apiId, @name, @nameNormalized, @bridleNumber, @nationIoc)
     ON CONFLICT(api_id) DO UPDATE SET
-      name          = excluded.name,
-      bridle_number = excluded.bridle_number
-  `).run(horse);
+      name            = excluded.name,
+      name_normalized = excluded.name_normalized,
+      bridle_number   = excluded.bridle_number
+  `).run({ ...horse, nameNormalized: normalizeForSearch(horse.name) });
 }
 
 export function upsertResult(db: Database.Database, result: {
@@ -260,6 +275,108 @@ export function searchByHorse(db: Database.Database, name: string, limit = 200):
     ORDER BY s.first_day DESC
     LIMIT @limit
   `).all({ name, limit }) as SearchResultRow[];
+}
+
+export interface PersonRow {
+  api_id: string;
+  name: string;
+  nation_ioc: string | null;
+  result_count: number;
+}
+
+export interface HorseRow {
+  api_id: string;
+  name: string;
+  bridle_number: string | null;
+  result_count: number;
+}
+
+export function searchPersons(db: Database.Database, name: string, limit = 30): PersonRow[] {
+  const nameNorm = normalizeForSearch(name);
+  return db.prepare(`
+    SELECT p.api_id, p.name, p.nation_ioc, COUNT(r.id) AS result_count
+    FROM persons p
+    JOIN results r ON r.person_api_id = p.api_id
+    WHERE p.name LIKE '%' || @name || '%' COLLATE NOCASE
+       OR p.name_normalized LIKE '%' || @nameNorm || '%'
+    GROUP BY p.api_id
+    ORDER BY result_count DESC
+    LIMIT @limit
+  `).all({ name, nameNorm, limit }) as PersonRow[];
+}
+
+export function searchHorses(db: Database.Database, name: string, limit = 30): HorseRow[] {
+  const nameNorm = normalizeForSearch(name);
+  return db.prepare(`
+    SELECT h.api_id, h.name, h.bridle_number, COUNT(r.id) AS result_count
+    FROM horses h
+    JOIN results r ON r.horse_api_id = h.api_id
+    WHERE h.name LIKE '%' || @name || '%' COLLATE NOCASE
+       OR h.name_normalized LIKE '%' || @nameNorm || '%'
+    GROUP BY h.api_id
+    ORDER BY result_count DESC
+    LIMIT @limit
+  `).all({ name, nameNorm, limit }) as HorseRow[];
+}
+
+export function getPersonResults(db: Database.Database, apiId: string, limit = 500): SearchResultRow[] {
+  return db.prepare(`
+    SELECT
+      p.name          AS person_name,
+      p.api_id        AS person_api_id,
+      h.name          AS horse_name,
+      h.api_id        AS horse_api_id,
+      s.name          AS show_name,
+      s.id            AS show_id,
+      s.first_day,
+      c.name          AS competition_name,
+      c.id            AS competition_id,
+      c.discipline,
+      r.rank_official,
+      r.placed,
+      r.hors_concours,
+      r.status,
+      r.score,
+      r.score_unit
+    FROM results r
+    JOIN persons      p ON p.api_id = r.person_api_id
+    LEFT JOIN horses  h ON h.api_id = r.horse_api_id
+    JOIN competitions c ON c.id     = r.competition_id
+    JOIN shows        s ON s.id     = c.show_id
+    WHERE r.person_api_id = @apiId
+    ORDER BY s.first_day DESC
+    LIMIT @limit
+  `).all({ apiId, limit }) as SearchResultRow[];
+}
+
+export function getHorseResults(db: Database.Database, apiId: string, limit = 500): SearchResultRow[] {
+  return db.prepare(`
+    SELECT
+      p.name          AS person_name,
+      p.api_id        AS person_api_id,
+      h.name          AS horse_name,
+      h.api_id        AS horse_api_id,
+      s.name          AS show_name,
+      s.id            AS show_id,
+      s.first_day,
+      c.name          AS competition_name,
+      c.id            AS competition_id,
+      c.discipline,
+      r.rank_official,
+      r.placed,
+      r.hors_concours,
+      r.status,
+      r.score,
+      r.score_unit
+    FROM results r
+    JOIN persons      p ON p.api_id = r.person_api_id
+    JOIN horses       h ON h.api_id = r.horse_api_id
+    JOIN competitions c ON c.id     = r.competition_id
+    JOIN shows        s ON s.id     = c.show_id
+    WHERE r.horse_api_id = @apiId
+    ORDER BY s.first_day DESC
+    LIMIT @limit
+  `).all({ apiId, limit }) as SearchResultRow[];
 }
 
 export function isShowCrawled(db: Database.Database, showId: number): boolean {
