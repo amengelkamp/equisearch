@@ -1,4 +1,4 @@
-# equi-score-search
+# equisearch
 
 A website for searching riders and horses in German equestrian competitions. Crawls fn-erfolgsdaten.de, stores results in SQLite, and serves a Next.js search UI.
 

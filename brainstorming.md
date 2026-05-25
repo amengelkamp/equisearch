@@ -1,4 +1,4 @@
-# Project Brainstorming — equi-score-search
+# Project Brainstorming — equisearch
 
 Answer the questions below to shape the direction of the project. Pick the option(s) that best fit your vision.
 
